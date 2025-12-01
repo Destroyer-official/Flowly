@@ -1,0 +1,260 @@
+package com.ledger.app.domain.usecase
+
+import com.ledger.app.domain.model.Counterparty
+import com.ledger.app.domain.model.PartialPayment
+import com.ledger.app.domain.model.Transaction
+import com.ledger.app.domain.model.TransactionDirection
+import com.ledger.app.domain.model.TransactionStatus
+import com.ledger.app.domain.repository.CounterpartyRepository
+import com.ledger.app.domain.repository.PartialPaymentRepository
+import com.ledger.app.domain.repository.TransactionRepository
+import kotlinx.coroutines.flow.first
+import java.math.BigDecimal
+import java.text.DecimalFormat
+import java.time.format.DateTimeFormatter
+import javax.inject.Inject
+
+/**
+ * Use case for exporting ledger data to shareable text format.
+ * 
+ * Supports:
+ * - Exporting a counterparty's full ledger with all transactions and partial payments
+ * - Exporting a single transaction with its partial payments
+ * 
+ * Requirements: 4.3
+ */
+class ExportLedgerUseCase @Inject constructor(
+    private val counterpartyRepository: CounterpartyRepository,
+    private val transactionRepository: TransactionRepository,
+    private val partialPaymentRepository: PartialPaymentRepository
+) {
+    private val dateFormatter = DateTimeFormatter.ofPattern("MMM dd, yyyy HH:mm")
+    private val amountFormatter = DecimalFormat("#,##0.00")
+
+    /**
+     * Result of an export operation.
+     */
+    sealed class ExportResult {
+        data class Success(val content: String, val title: String) : ExportResult()
+        data class Error(val message: String) : ExportResult()
+    }
+
+    /**
+     * Exports a counterparty's full ledger to shareable text format.
+     * 
+     * Includes:
+     * - Counterparty name and net balance
+     * - All transactions with that counterparty
+     * - Partial payments for each transaction
+     * 
+     * Requirements: 4.3
+     * 
+     * @param counterpartyId The ID of the counterparty
+     * @return ExportResult with the formatted text or error
+     */
+    suspend fun exportCounterpartyLedger(counterpartyId: Long): ExportResult {
+        val counterparty = counterpartyRepository.getById(counterpartyId)
+            ?: return ExportResult.Error("Counterparty not found")
+
+        val transactions = transactionRepository
+            .getByCounterparty(counterpartyId)
+            .first()
+
+        val netBalance = calculateNetBalance(transactions)
+        
+        val content = buildString {
+            appendLine("═══════════════════════════════════════")
+            appendLine("       LEDGER EXPORT")
+            appendLine("═══════════════════════════════════════")
+            appendLine()
+            appendLine("Person: ${counterparty.displayName}")
+            counterparty.phoneNumber?.let { appendLine("Phone: $it") }
+            appendLine()
+            appendLine("───────────────────────────────────────")
+            appendLine("NET BALANCE: ₹${amountFormatter.format(netBalance.abs())}")
+            appendLine(
+                when {
+                    netBalance > BigDecimal.ZERO -> "(${counterparty.displayName} owes you)"
+                    netBalance < BigDecimal.ZERO -> "(You owe ${counterparty.displayName})"
+                    else -> "(Settled)"
+                }
+            )
+            appendLine("───────────────────────────────────────")
+            appendLine()
+            
+            if (transactions.isEmpty()) {
+                appendLine("No transactions found.")
+            } else {
+                appendLine("TRANSACTIONS (${transactions.size} total)")
+                appendLine()
+                
+                transactions.forEachIndexed { index, transaction ->
+                    appendLine("${index + 1}. ${formatTransactionSummary(transaction)}")
+                    appendLine("   Date: ${transaction.transactionDateTime.format(dateFormatter)}")
+                    appendLine("   Status: ${formatStatus(transaction.status)}")
+                    
+                    if (transaction.remainingDue != transaction.amount) {
+                        appendLine("   Remaining: ₹${amountFormatter.format(transaction.remainingDue)}")
+                    }
+                    
+                    transaction.notes?.let { appendLine("   Note: $it") }
+                    
+                    // Get partial payments for this transaction
+                    val payments = partialPaymentRepository
+                        .getByTransaction(transaction.id)
+                        .first()
+                    
+                    if (payments.isNotEmpty()) {
+                        appendLine("   Payments:")
+                        payments.forEach { payment ->
+                            appendLine("     • ₹${amountFormatter.format(payment.amount)} on ${payment.dateTime.format(dateFormatter)}")
+                        }
+                    }
+                    appendLine()
+                }
+            }
+            
+            appendLine("───────────────────────────────────────")
+            appendLine("Generated by Ledger App")
+            appendLine("Export Date: ${java.time.LocalDateTime.now().format(dateFormatter)}")
+        }
+
+        return ExportResult.Success(
+            content = content,
+            title = "Ledger - ${counterparty.displayName}"
+        )
+    }
+
+    /**
+     * Exports a single transaction to shareable text format.
+     * 
+     * Includes:
+     * - Transaction details (amount, direction, date, status)
+     * - All partial payments
+     * - Payment timeline
+     * 
+     * Requirements: 4.3
+     * 
+     * @param transactionId The ID of the transaction
+     * @param counterpartyName Optional counterparty name for display
+     * @param accountName Optional account name for display
+     * @param categoryName Optional category name for display
+     * @return ExportResult with the formatted text or error
+     */
+    suspend fun exportTransaction(
+        transactionId: Long,
+        counterpartyName: String? = null,
+        accountName: String? = null,
+        categoryName: String? = null
+    ): ExportResult {
+        val transaction = transactionRepository.getById(transactionId)
+            ?: return ExportResult.Error("Transaction not found")
+
+        val payments = partialPaymentRepository
+            .getByTransaction(transactionId)
+            .first()
+
+        val content = buildString {
+            appendLine("═══════════════════════════════════════")
+            appendLine("       TRANSACTION LOG")
+            appendLine("═══════════════════════════════════════")
+            appendLine()
+            appendLine("Amount: ₹${amountFormatter.format(transaction.amount)}")
+            appendLine("Type: ${formatDirection(transaction.direction)}")
+            counterpartyName?.let { appendLine("Person: $it") }
+            appendLine("Date: ${transaction.transactionDateTime.format(dateFormatter)}")
+            appendLine("Status: ${formatStatus(transaction.status)}")
+            categoryName?.let { appendLine("Category: $it") }
+            accountName?.let { appendLine("Account: $it") }
+            transaction.notes?.let { appendLine("Note: $it") }
+            
+            // Bill-specific info
+            transaction.consumerId?.let { appendLine("Consumer ID: $it") }
+            if (transaction.isForSelf) {
+                appendLine("For: Self")
+            }
+            
+            appendLine()
+            appendLine("───────────────────────────────────────")
+            appendLine("PAYMENT DETAILS")
+            appendLine("───────────────────────────────────────")
+            appendLine()
+            appendLine("Original Amount: ₹${amountFormatter.format(transaction.amount)}")
+            
+            if (payments.isNotEmpty()) {
+                val totalPaid = payments.fold(BigDecimal.ZERO) { acc, p -> acc + p.amount }
+                appendLine("Total Paid: ₹${amountFormatter.format(totalPaid)}")
+                appendLine("Remaining: ₹${amountFormatter.format(transaction.remainingDue)}")
+                appendLine()
+                appendLine("Payment History:")
+                payments.forEachIndexed { index, payment ->
+                    appendLine("  ${index + 1}. ₹${amountFormatter.format(payment.amount)}")
+                    appendLine("     Date: ${payment.dateTime.format(dateFormatter)}")
+                    appendLine("     Method: ${payment.method.name}")
+                    payment.notes?.let { appendLine("     Note: $it") }
+                }
+            } else {
+                appendLine("Total Paid: ₹0.00")
+                appendLine("Remaining: ₹${amountFormatter.format(transaction.remainingDue)}")
+                appendLine()
+                appendLine("No payments recorded yet.")
+            }
+            
+            appendLine()
+            appendLine("───────────────────────────────────────")
+            appendLine("Generated by Ledger App")
+            appendLine("Export Date: ${java.time.LocalDateTime.now().format(dateFormatter)}")
+        }
+
+        val title = buildString {
+            append("Transaction - ₹${amountFormatter.format(transaction.amount)}")
+            counterpartyName?.let { append(" - $it") }
+        }
+
+        return ExportResult.Success(
+            content = content,
+            title = title
+        )
+    }
+
+    /**
+     * Calculates the net balance for a counterparty from their transactions.
+     * 
+     * Net balance = sum(GAVE remaining_due) - sum(RECEIVED remaining_due)
+     * Positive = they owe user, Negative = user owes them
+     */
+    private fun calculateNetBalance(transactions: List<Transaction>): BigDecimal {
+        val activeTransactions = transactions.filter { it.status != TransactionStatus.CANCELLED }
+        
+        val totalGave = activeTransactions
+            .filter { it.direction == TransactionDirection.GAVE }
+            .fold(BigDecimal.ZERO) { acc, t -> acc + t.remainingDue }
+
+        val totalReceived = activeTransactions
+            .filter { it.direction == TransactionDirection.RECEIVED }
+            .fold(BigDecimal.ZERO) { acc, t -> acc + t.remainingDue }
+
+        return totalGave - totalReceived
+    }
+
+    private fun formatTransactionSummary(transaction: Transaction): String {
+        val direction = formatDirection(transaction.direction)
+        return "$direction ₹${amountFormatter.format(transaction.amount)}"
+    }
+
+    private fun formatDirection(direction: TransactionDirection): String {
+        return when (direction) {
+            TransactionDirection.GAVE -> "GAVE"
+            TransactionDirection.RECEIVED -> "RECEIVED"
+        }
+    }
+
+    private fun formatStatus(status: TransactionStatus): String {
+        return when (status) {
+            TransactionStatus.PENDING -> "Pending"
+            TransactionStatus.PARTIALLY_SETTLED -> "Partially Settled"
+            TransactionStatus.SETTLED -> "Settled"
+            TransactionStatus.CANCELLED -> "Cancelled"
+        }
+    }
+}

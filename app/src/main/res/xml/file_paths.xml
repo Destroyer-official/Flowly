@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Internal files directory for exports -->
+    <files-path
+        name="exports"
+        path="exports/" />
+    
+    <!-- Internal files directory for backups -->
+    <files-path
+        name="backups"
+        path="backups/" />
+</paths>
