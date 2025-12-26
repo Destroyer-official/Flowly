@@ -1,7 +1,7 @@
 # 💰 Flowly - Personal Finance & Task Tracker
 
 <p align="center">
-  <img src="app/src/main/res/drawable/ic_launcher.png" width="120" alt="Flowly Logo"/>
+  <img src="app/src/main/res/mipmap-hdpi/ic_launcher.png" width="120" alt="Flowly Logo"/>
 </p>
 
 <p align="center">
